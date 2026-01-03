@@ -1,0 +1,7 @@
+{
+  "name": "FoxScribe 7.3",
+  "description": "A futuristic, neon-styled meeting assistant. Records audio, visualizes voice data, and uses Gemini to automatically transcribe and summarize meetings.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
