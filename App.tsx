@@ -1,10 +1,15 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { AppState, MeetingData } from './types';
+import React, { useState, useRef, useEffect } from 'react';
+import { AppState, MeetingData, MeetingRecord } from './types';
 import { NeonButton } from './components/NeonButton';
 import { Visualizer } from './components/Visualizer';
 import { transcribeAndSummarize } from './services/geminiService';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import { supabase } from './supabaseClient';
+import { Auth } from './components/Auth';
+import { CloudDocs } from './components/CloudDocs';
+import { MeetingHistory } from './components/MeetingHistory';
+import { User } from '@supabase/supabase-js';
 
 // Icons
 const MicIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>;
@@ -16,6 +21,8 @@ const FileTextIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" he
 const ScrollIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/><path d="M10 2v4h4"/></svg>;
 const DownloadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>;
 const SaveIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>;
+const CloudUploadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 13v8"/><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="m8 17 4-4 4 4"/></svg>;
+const LogoutIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>;
 
 // New Fox Tech Logo
 const FoxTechLogo = ({ className = "w-12 h-12" }) => (
@@ -42,10 +49,13 @@ const FoxTechLogo = ({ className = "w-12 h-12" }) => (
 );
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
   const [meetingTitle, setMeetingTitle] = useState('');
   
-  // New States for Association Logic
   const [assemblyType, setAssemblyType] = useState<'ORDINÁRIA' | 'EXTRAORDINÁRIA'>('ORDINÁRIA');
   const [assemblyNumber, setAssemblyNumber] = useState('');
 
@@ -57,11 +67,37 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'summary' | 'transcript' | 'minutes' | 'export'>('summary');
   const [mimeType, setMimeType] = useState<string>('');
   const [isPdfGenerating, setIsPdfGenerating] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isAlreadySaved, setIsAlreadySaved] = useState(false);
+  const [refreshHistoryTrigger, setRefreshHistoryTrigger] = useState(0);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   const ataDocumentRef = useRef<HTMLDivElement>(null);
+
+  // Supabase Auth Listener
+  useEffect(() => {
+    if (isOfflineMode) {
+        setAuthLoading(false);
+        return;
+    }
+
+    // Check active session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [isOfflineMode]);
 
   // Auto-number logic on mount
   useEffect(() => {
@@ -111,6 +147,7 @@ export default function App() {
 
       mediaRecorder.start();
       setAppState(AppState.RECORDING);
+      setIsAlreadySaved(false);
       
       timerRef.current = window.setInterval(() => {
         setTimer(prev => prev + 1);
@@ -136,12 +173,10 @@ export default function App() {
   };
 
   const resetApp = () => {
-    // Stop any playing audio
     if (audioURL) {
       URL.revokeObjectURL(audioURL);
     }
     
-    // Clear state completely
     setMeetingTitle('');
     setTimer(0);
     setUserNotes('');
@@ -150,11 +185,10 @@ export default function App() {
     setFinalData(null);
     setMimeType('');
     setActiveTab('summary');
+    setIsAlreadySaved(false);
     
-    // Update auto number for next logic suggestion (generic approach)
     const year = new Date().getFullYear();
     setAssemblyNumber((prev) => {
-      // Try to increment if it's a simple number
       const num = parseInt(prev.split('/')[0]);
       if (!isNaN(num)) {
          return `${(num + 1).toString().padStart(3, '0')}/${year}`;
@@ -163,6 +197,7 @@ export default function App() {
     });
 
     setAppState(AppState.IDLE);
+    setRefreshHistoryTrigger(prev => prev + 1); // Refresh history list
   };
 
   const processMeetingData = async (audioBlob: Blob) => {
@@ -190,6 +225,103 @@ export default function App() {
     setAppState(AppState.REVIEW);
   };
 
+  const saveMeetingToSupabase = async () => {
+    if (!finalData || isOfflineMode || !user) {
+        if(isOfflineMode) alert("Funcionalidade indisponível no modo offline.");
+        return;
+    }
+
+    if (isAlreadySaved) return;
+
+    setIsSaving(true);
+    try {
+        let audioPath = null;
+
+        // 1. Upload Audio if it exists and hasn't been uploaded (Blob present)
+        if (finalData.audioBlob) {
+            const fileName = `audio_${Date.now()}.webm`;
+            const filePath = `${user.id}/${fileName}`;
+            const { error: uploadError } = await supabase.storage
+                .from('user_docs')
+                .upload(filePath, finalData.audioBlob);
+            
+            if (uploadError) throw uploadError;
+            audioPath = filePath;
+        } else if (finalData.audioUrl) {
+            // Already uploaded/loaded from history
+            audioPath = finalData.audioUrl;
+        }
+
+        // 2. Insert Data
+        const { error } = await supabase.from('meetings').insert({
+            user_id: user.id,
+            title: finalData.title,
+            date: finalData.date.toISOString(),
+            duration: finalData.duration,
+            assembly_type: finalData.assemblyType,
+            assembly_number: finalData.assemblyNumber,
+            summary: finalData.summary,
+            transcript: finalData.transcript,
+            minutes: finalData.minutes,
+            audio_url: audioPath
+        });
+
+        if (error) throw error;
+        
+        setIsAlreadySaved(true);
+        // Update local state to reflect it's saved (and has a path now if it was new)
+        setFinalData(prev => prev ? ({ ...prev, audioUrl: audioPath || prev.audioUrl }) : null);
+
+        alert("Ata, resumo e áudio salvos na nuvem com sucesso!");
+    } catch (error: any) {
+        console.error("Save error:", error);
+        alert("Erro ao salvar: " + error.message);
+    } finally {
+        setIsSaving(false);
+    }
+  };
+
+  const loadPastMeeting = (record: MeetingRecord) => {
+    setFinalData({
+        id: record.id,
+        title: record.title,
+        date: new Date(record.date),
+        duration: record.duration,
+        audioBlob: null, // Audio is in storage, not blob. We use audioUrl.
+        transcript: record.transcript,
+        summary: record.summary,
+        minutes: record.minutes,
+        userNotes: "Registro Histórico (Carregado)",
+        assemblyType: record.assembly_type as any,
+        assemblyNumber: record.assembly_number,
+        audioUrl: record.audio_url
+    });
+    setIsAlreadySaved(true); // Disable save button for historical records
+    setAppState(AppState.REVIEW);
+  };
+
+  const downloadSecureAudio = async () => {
+    if (!finalData?.audioUrl) return;
+    
+    try {
+        const { data, error } = await supabase.storage
+            .from('user_docs')
+            .createSignedUrl(finalData.audioUrl, 60); // 1 minute link
+
+        if (error) throw error;
+        if (data?.signedUrl) {
+            const a = document.createElement('a');
+            a.href = data.signedUrl;
+            a.download = `Audio-${finalData.assemblyNumber?.replace('/','-')}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+    } catch (e: any) {
+        alert("Erro ao baixar áudio: " + e.message);
+    }
+  };
+
   const generatePDF = async () => {
     if (!ataDocumentRef.current || !finalData) return;
     
@@ -197,17 +329,12 @@ export default function App() {
     
     try {
       const element = ataDocumentRef.current;
-      
-      // Use html2canvas to render the content to an image
       const canvas = await html2canvas(element, { 
         scale: 2, 
         backgroundColor: '#ffffff'
       });
       
       const imgData = canvas.toDataURL('image/png');
-      
-      // Initialize PDF (A4 size, portrait)
-      // A4 dimensions: 210mm x 297mm
       const pdf = new jsPDF('p', 'mm', 'a4');
       const pdfWidth = pdf.internal.pageSize.getWidth(); 
       const pdfHeight = pdf.internal.pageSize.getHeight();
@@ -215,22 +342,18 @@ export default function App() {
       const imgWidth = canvas.width;
       const imgHeight = canvas.height;
       
-      // Calculate aspect ratio to fit width of PDF
       const ratio = pdfWidth / imgWidth;
       const imgHeightInPdf = imgHeight * ratio;
       
       let heightLeft = imgHeightInPdf;
       let position = 0;
 
-      // Add first page
       pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeightInPdf);
       heightLeft -= pdfHeight;
 
-      // Add subsequent pages if content overflows
       while (heightLeft > 0) {
-        position = heightLeft - imgHeightInPdf; // This moves the image up to show the next section
+        position = heightLeft - imgHeightInPdf;
         pdf.addPage();
-        // We render the SAME image but shifted upwards, hiding the top part off-canvas
         pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeightInPdf);
         heightLeft -= pdfHeight;
       }
@@ -245,14 +368,13 @@ export default function App() {
     }
   };
 
-  const saveAudioFile = async () => {
+  // Legacy local save (for immediate recording)
+  const saveAudioFileLocal = async () => {
     if (!finalData?.audioBlob) return;
     
     const suggestedName = `Audio-Ata-${finalData.assemblyNumber?.replace('/', '-')}.webm`;
 
     try {
-      // Try File System Access API first
-      // Check if API exists and we are not in a restricted iframe environment
       if ('showSaveFilePicker' in window) {
         const handle = await (window as any).showSaveFilePicker({
           suggestedName: suggestedName,
@@ -265,26 +387,35 @@ export default function App() {
         await writable.write(finalData.audioBlob);
         await writable.close();
         alert("Áudio salvo com sucesso!");
-        return; // Success, exit
+        return;
       }
     } catch (err: any) {
-      // Ignore AbortError (user cancelled)
       if (err.name === 'AbortError') return;
-      
-      console.warn("File System Access API failed (likely iframe restriction), falling back to download link.", err);
-      // Fall through to legacy download method
+      console.warn("File System Access API failed, falling back.");
     }
 
-    // Legacy/Fallback download method for iframes/unsupported browsers
     const url = URL.createObjectURL(finalData.audioBlob);
     const a = document.createElement('a');
     a.href = url;
     a.download = suggestedName;
-    document.body.appendChild(a); // Append to body is safer for some browsers
+    document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-neon-bg flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-neon-orange border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  // Show Auth if not logged in AND not in offline mode
+  if (!user && !isOfflineMode) {
+    return <Auth onEnterOffline={() => setIsOfflineMode(true)} />;
+  }
 
   return (
     <div className="min-h-screen bg-neon-bg text-gray-200 selection:bg-neon-cyan selection:text-black font-sans flex flex-col">
@@ -292,17 +423,35 @@ export default function App() {
       {/* Header */}
       <header className="border-b border-slate-800 bg-neon-bg/80 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setAppState(AppState.IDLE)}>
             <FoxTechLogo className="w-10 h-10" />
             <h1 className="text-2xl font-bold tracking-tighter text-white">
               Fox<span className="text-neon-orange">Scribe</span> <span className="text-neon-cyan">7.3</span>
             </h1>
           </div>
-          <div className="text-sm font-medium text-slate-400 hidden sm:block">
-            {appState === AppState.IDLE && "Pronto para Agendar"}
-            {appState === AppState.RECORDING && <span className="text-red-400 animate-pulse">● Gravando Agora</span>}
-            {appState === AppState.PROCESSING && <span className="text-neon-purple animate-bounce">Processando IA...</span>}
-            {appState === AppState.REVIEW && "Reunião Finalizada"}
+          <div className="flex items-center gap-4">
+            <div className="text-sm font-medium text-slate-400 hidden sm:block">
+              {isOfflineMode ? "Modo Offline (Demo)" : user?.email}
+            </div>
+            
+            {!isOfflineMode && (
+                <button 
+                onClick={() => supabase.auth.signOut()}
+                className="text-slate-400 hover:text-red-400 transition-colors"
+                title="Sair"
+                >
+                <LogoutIcon />
+                </button>
+            )}
+
+            {isOfflineMode && (
+                <button 
+                onClick={() => setIsOfflineMode(false)}
+                className="text-slate-400 hover:text-neon-cyan transition-colors text-xs border border-slate-700 rounded px-2 py-1"
+                >
+                Fazer Login
+                </button>
+            )}
           </div>
         </div>
       </header>
@@ -311,67 +460,82 @@ export default function App() {
         
         {/* IDLE STATE: SCHEDULER / SETUP */}
         {appState === AppState.IDLE && (
-          <div className="flex flex-col items-center justify-center min-h-[60vh] animate-in fade-in zoom-in duration-500">
-            <div className="w-full max-w-lg p-8 rounded-2xl bg-neon-surface border border-slate-800 shadow-[0_0_50px_-12px_rgba(249,115,22,0.15)]">
-              
-              <div className="flex items-center justify-center gap-4 mb-8 pb-6 border-b border-slate-800">
-                 <FoxTechLogo className="w-20 h-20 drop-shadow-[0_0_15px_rgba(249,115,22,0.3)]" />
-                 <div>
-                    <h3 className="text-xl font-bold text-white">Gestão Inteligente</h3>
-                    <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-neon-orange to-neon-purple tracking-widest">FOX SCRIBE</h2>
-                 </div>
-              </div>
-
-              <div className="space-y-6">
+          <div className="animate-in fade-in zoom-in duration-500 space-y-12">
+            
+            <div className="flex flex-col items-center justify-center">
+              <div className="w-full max-w-lg p-8 rounded-2xl bg-neon-surface border border-slate-800 shadow-[0_0_50px_-12px_rgba(249,115,22,0.15)]">
                 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="col-span-2 sm:col-span-1">
-                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Tipo de Assembleia</label>
-                    <select 
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none"
-                      value={assemblyType}
-                      onChange={(e) => setAssemblyType(e.target.value as 'ORDINÁRIA' | 'EXTRAORDINÁRIA')}
-                    >
-                      <option value="ORDINÁRIA">ORDINÁRIA</option>
-                      <option value="EXTRAORDINÁRIA">EXTRAORDINÁRIA</option>
-                    </select>
+                <div className="flex items-center justify-center gap-4 mb-8 pb-6 border-b border-slate-800">
+                  <FoxTechLogo className="w-20 h-20 drop-shadow-[0_0_15px_rgba(249,115,22,0.3)]" />
+                  <div>
+                      <h3 className="text-xl font-bold text-white">Gestão Inteligente</h3>
+                      <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-neon-orange to-neon-purple tracking-widest">FOX SCRIBE</h2>
                   </div>
+                </div>
+
+                <div className="space-y-6">
                   
-                  <div className="col-span-2 sm:col-span-1">
-                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                       Nº da Ata
-                       <span className="ml-2 text-[10px] text-neon-orange bg-neon-orange/10 px-1 rounded">Auto</span>
-                    </label>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="col-span-2 sm:col-span-1">
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Tipo de Assembleia</label>
+                      <select 
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none"
+                        value={assemblyType}
+                        onChange={(e) => setAssemblyType(e.target.value as 'ORDINÁRIA' | 'EXTRAORDINÁRIA')}
+                      >
+                        <option value="ORDINÁRIA">ORDINÁRIA</option>
+                        <option value="EXTRAORDINÁRIA">EXTRAORDINÁRIA</option>
+                      </select>
+                    </div>
+                    
+                    <div className="col-span-2 sm:col-span-1">
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                        Nº da Ata
+                        <span className="ml-2 text-[10px] text-neon-orange bg-neon-orange/10 px-1 rounded">Auto</span>
+                      </label>
+                      <input 
+                        type="text" 
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none"
+                        value={assemblyNumber}
+                        onChange={(e) => setAssemblyNumber(e.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-400 mb-2">Assunto / Tópico Principal</label>
                     <input 
                       type="text" 
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none"
-                      value={assemblyNumber}
-                      onChange={(e) => setAssemblyNumber(e.target.value)}
+                      placeholder="ex: Planejamento Anual" 
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none transition-all"
+                      value={meetingTitle}
+                      onChange={(e) => setMeetingTitle(e.target.value)}
                     />
                   </div>
-                </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-2">Assunto / Tópico Principal</label>
-                  <input 
-                    type="text" 
-                    placeholder="ex: Planejamento Anual" 
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-white focus:border-neon-orange focus:ring-1 focus:ring-neon-orange outline-none transition-all"
-                    value={meetingTitle}
-                    onChange={(e) => setMeetingTitle(e.target.value)}
-                  />
-                </div>
-
-                <div className="pt-2 flex justify-center">
-                  <NeonButton 
-                    onClick={startMeeting} 
-                    icon={<MicIcon />}
-                    className="w-full"
-                  >
-                    Iniciar Gravação
-                  </NeonButton>
+                  <div className="pt-2 flex justify-center">
+                    <NeonButton 
+                      onClick={startMeeting} 
+                      icon={<MicIcon />}
+                      className="w-full"
+                    >
+                      Iniciar Gravação
+                    </NeonButton>
+                  </div>
                 </div>
               </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {/* Cloud Documents Section */}
+                <CloudDocs isOffline={isOfflineMode} />
+                
+                {/* Meeting History Section */}
+                <MeetingHistory 
+                    isOffline={isOfflineMode} 
+                    onSelectMeeting={loadPastMeeting} 
+                    refreshTrigger={refreshHistoryTrigger}
+                />
             </div>
           </div>
         )}
@@ -456,10 +620,20 @@ export default function App() {
                </div>
                <div className="flex gap-2">
                  <NeonButton 
+                   onClick={saveMeetingToSupabase}
+                   // Disabled if saving OR if in offline mode OR if already saved
+                   disabled={isSaving || isOfflineMode || isAlreadySaved || (!finalData.audioBlob && !finalData.audioUrl)} 
+                   className={isSaving || isAlreadySaved ? "opacity-50 cursor-not-allowed" : ""}
+                   icon={isAlreadySaved ? <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg> : <CloudUploadIcon />}
+                 >
+                    {isSaving ? "Salvando..." : isAlreadySaved ? "Salvo" : "Salvar no Cloud"}
+                 </NeonButton>
+                 
+                 <NeonButton 
                    variant="secondary" 
                    onClick={resetApp}
                  >
-                   Nova Assembleia
+                   Voltar ao Início
                  </NeonButton>
                </div>
             </div>
@@ -569,7 +743,7 @@ export default function App() {
                     {/* EXPORT TAB OVERLAY CONTROLS */}
                     {activeTab === 'export' && (
                        <div className="absolute inset-0 bg-neon-surface/90 backdrop-blur-sm z-10 flex items-center justify-center p-8 animate-in fade-in duration-300">
-                          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-8 shadow-2xl">
+                          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
                              <h3 className="text-2xl font-bold text-white mb-2 flex items-center gap-2">
                                <DownloadIcon /> Central de Downloads
                              </h3>
@@ -614,9 +788,9 @@ export default function App() {
                                   <DownloadIcon />
                                 </button>
 
-                                {audioURL && (
+                                {finalData.audioBlob && (
                                   <button 
-                                    onClick={saveAudioFile}
+                                    onClick={saveAudioFileLocal}
                                     className="w-full flex items-center justify-between p-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-green-500 rounded-lg group transition-all"
                                   >
                                     <div className="flex items-center gap-3">
@@ -624,8 +798,26 @@ export default function App() {
                                          <SaveIcon />
                                        </div>
                                        <div className="text-left">
-                                          <div className="text-white font-semibold">Salvar Áudio no Dispositivo</div>
-                                          <div className="text-xs text-slate-500">Escolher pasta para salvar</div>
+                                          <div className="text-white font-semibold">Salvar Áudio (Local)</div>
+                                          <div className="text-xs text-slate-500">Arquivo WebM original</div>
+                                       </div>
+                                    </div>
+                                    <DownloadIcon />
+                                  </button>
+                                )}
+                                
+                                {finalData.audioUrl && !finalData.audioBlob && (
+                                  <button 
+                                    onClick={downloadSecureAudio}
+                                    className="w-full flex items-center justify-between p-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-green-500 rounded-lg group transition-all"
+                                  >
+                                    <div className="flex items-center gap-3">
+                                       <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center text-green-500">
+                                         <SaveIcon />
+                                       </div>
+                                       <div className="text-left">
+                                          <div className="text-white font-semibold">Baixar Gravação da Nuvem</div>
+                                          <div className="text-xs text-slate-500">Link Seguro Temporário</div>
                                        </div>
                                     </div>
                                     <DownloadIcon />

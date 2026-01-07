@@ -25,6 +25,7 @@ export const transcribeAndSummarize = async (
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const base64Audio = await blobToBase64(audioBlob);
 
+    // Using gemini-2.0-flash-exp as it currently supports multimodal inputs (audio) reliably
     const model = 'gemini-2.0-flash-exp';
 
     const prompt = `
@@ -108,29 +109,4 @@ export const transcribeAndSummarize = async (
     });
 
     const fullText = response.text || "";
-    const parts = fullText.split('---SECTION_DIVIDER---');
-    
-    if (parts.length >= 3) {
-       return {
-         summary: parts[0].trim(),
-         minutes: parts[1].trim(),
-         transcript: parts[2].trim()
-       };
-    } else {
-       // Fallback logic
-       return {
-         summary: "Não foi possível separar as seções corretamente. Saída completa abaixo:\n\n" + fullText,
-         minutes: "Falha na geração do documento.",
-         transcript: "Falha na geração da transcrição."
-       };
-    }
-
-  } catch (error) {
-    console.error("Gemini Transcription Error:", error);
-    return {
-      summary: "Erro ao processar os dados da reunião.",
-      minutes: "Erro ao gerar a ata.",
-      transcript: `Ocorreu um erro: ${(error as any).message || "Erro desconhecido"}.`
-    };
-  }
-};
+    const parts = fullText.split('---SECTION_DIVIDER
